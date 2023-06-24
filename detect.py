@@ -1,150 +1,87 @@
-# Copyright 2021 The TensorFlow Authors. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Main script to run the object detection routine."""
-import argparse
-import sys
-import time
-
+import re
 import cv2
-from tflite_support.task import core
-from tflite_support.task import processor
-from tflite_support.task import vision
-import utils
+from tflite_runtime.interpreter import Interpreter
+import numpy as np
+
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+
+def load_labels(path='labels.txt'):
+  """Loads the labels file. Supports files with or without index numbers."""
+  with open(path, 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+    labels = {}
+    for row_number, content in enumerate(lines):
+      pair = re.split(r'[:\s]+', content.strip(), maxsplit=1)
+      if len(pair) == 2 and pair[0].strip().isdigit():
+        labels[int(pair[0])] = pair[1].strip()
+      else:
+        labels[row_number] = pair[0].strip()
+  return labels
+
+def set_input_tensor(interpreter, image):
+  """Sets the input tensor."""
+  tensor_index = interpreter.get_input_details()[0]['index']
+  input_tensor = interpreter.tensor(tensor_index)()[0]
+  input_tensor[:, :] = np.expand_dims((image-255)/255, axis=0)
 
 
-def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
-        enable_edgetpu: bool) -> None:
-  """Continuously run inference on images acquired from the camera.
+def get_output_tensor(interpreter, index):
+  """Returns the output tensor at the given index."""
+  output_details = interpreter.get_output_details()[index]
+  tensor = np.squeeze(interpreter.get_tensor(output_details['index']))
+  return tensor
 
-  Args:
-    model: Name of the TFLite object detection model.
-    camera_id: The camera id to be passed to OpenCV.
-    width: The width of the frame captured from the camera.
-    height: The height of the frame captured from the camera.
-    num_threads: The number of CPU threads to run the model.
-    enable_edgetpu: True/False whether the model is a EdgeTPU model.
-  """
 
-  # Variables to calculate FPS
-  counter, fps = 0, 0
-  start_time = time.time()
+def detect_objects(interpreter, image, threshold):
+  """Returns a list of detection results, each a dictionary of object info."""
+  set_input_tensor(interpreter, image)
+  interpreter.invoke()
+  # Get all output details
+  boxes = get_output_tensor(interpreter, 0)
+  classes = get_output_tensor(interpreter, 1)
+  scores = get_output_tensor(interpreter, 2)
+  count = int(get_output_tensor(interpreter, 3))
 
-  # Start capturing video input from the camera
-  cap = cv2.VideoCapture(camera_id)
-  cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-  cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-
-  # Visualization parameters
-  row_size = 20  # pixels
-  left_margin = 24  # pixels
-  text_color = (0, 0, 255)  # red
-  font_size = 1
-  font_thickness = 1
-  fps_avg_frame_count = 10
-
-  # Initialize the object detection model
-  base_options = core.BaseOptions(
-      file_name=model, use_coral=enable_edgetpu, num_threads=num_threads)
-  detection_options = processor.DetectionOptions(
-      max_results=3, score_threshold=0.3)
-  options = vision.ObjectDetectorOptions(
-      base_options=base_options, detection_options=detection_options)
-  detector = vision.ObjectDetector.create_from_options(options)
-
-  # Continuously capture images from the camera and run inference
-  while cap.isOpened():
-    success, image = cap.read()
-    if not success:
-      sys.exit(
-          'ERROR: Unable to read from webcam. Please verify your webcam settings.'
-      )
-
-    counter += 1
-    image = cv2.flip(image, 1)
-
-    # Convert the image from BGR to RGB as required by the TFLite model.
-    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-    # Create a TensorImage object from the RGB image.
-    input_tensor = vision.TensorImage.create_from_array(rgb_image)
-
-    # Run object detection estimation using the model.
-    detection_result = detector.detect(input_tensor)
-
-    # Draw keypoints and edges on input image
-    image = utils.visualize(image, detection_result)
-
-    # Calculate the FPS
-    if counter % fps_avg_frame_count == 0:
-      end_time = time.time()
-      fps = fps_avg_frame_count / (end_time - start_time)
-      start_time = time.time()
-
-    # Show the FPS
-    fps_text = 'FPS = {:.1f}'.format(fps)
-    text_location = (left_margin, row_size)
-    cv2.putText(image, fps_text, text_location, cv2.FONT_HERSHEY_PLAIN,
-                font_size, text_color, font_thickness)
-
-    # Stop the program if the ESC key is pressed.
-    if cv2.waitKey(1) == 27:
-      break
-    cv2.imshow('object_detector', image)
-
-  cap.release()
-  cv2.destroyAllWindows()
-
+  results = []
+  for i in range(count):
+    if scores[i] >= threshold:
+      result = {
+          'bounding_box': boxes[i],
+          'class_id': classes[i],
+          'score': scores[i]
+      }
+      results.append(result)
+  return results
 
 def main():
-  parser = argparse.ArgumentParser(
-      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  parser.add_argument(
-      '--model',
-      help='Path of the object detection model.',
-      required=False,
-      default='efficientdet_lite0.tflite')
-  parser.add_argument(
-      '--cameraId', help='Id of camera.', required=False, type=int, default=0)
-  parser.add_argument(
-      '--frameWidth',
-      help='Width of frame to capture from camera.',
-      required=False,
-      type=int,
-      default=640)
-  parser.add_argument(
-      '--frameHeight',
-      help='Height of frame to capture from camera.',
-      required=False,
-      type=int,
-      default=480)
-  parser.add_argument(
-      '--numThreads',
-      help='Number of CPU threads to run the model.',
-      required=False,
-      type=int,
-      default=4)
-  parser.add_argument(
-      '--enableEdgeTPU',
-      help='Whether to run the model on EdgeTPU.',
-      action='store_true',
-      required=False,
-      default=False)
-  args = parser.parse_args()
+    labels = load_labels()
+    interpreter = Interpreter('detect.tflite')
+    interpreter.allocate_tensors()
+    _, input_height, input_width, _ = interpreter.get_input_details()[0]['shape']
 
-  run(args.model, int(args.cameraId), args.frameWidth, args.frameHeight,
-      int(args.numThreads), bool(args.enableEdgeTPU))
+    cap = cv2.VideoCapture(0)
+    while cap.isOpened():
+        ret, frame = cap.read()
+        img = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (320,320))
+        res = detect_objects(interpreter, img, 0.8)
+        print(res)
 
+        for result in res:
+            ymin, xmin, ymax, xmax = result['bounding_box']
+            xmin = int(max(1,xmin * CAMERA_WIDTH))
+            xmax = int(min(CAMERA_WIDTH, xmax * CAMERA_WIDTH))
+            ymin = int(max(1, ymin * CAMERA_HEIGHT))
+            ymax = int(min(CAMERA_HEIGHT, ymax * CAMERA_HEIGHT))
+            
+            cv2.rectangle(frame,(xmin, ymin),(xmax, ymax),(0,255,0),3)
+            cv2.putText(frame,labels[int(result['class_id'])],(xmin, min(ymax, CAMERA_HEIGHT-20)), cv2.FONT_HERSHEY_SIMPLEX, 0.5,(255,255,255),2,cv2.LINE_AA) 
 
-if __name__ == '__main__':
-  main()
+        cv2.imshow('Pi Feed', frame)
+
+        if cv2.waitKey(10) & 0xFF ==ord('q'):
+            cap.release()
+            cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()

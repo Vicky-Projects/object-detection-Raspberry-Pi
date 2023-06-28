@@ -3,10 +3,8 @@ import cv2
 from tflite_runtime.interpreter import Interpreter
 import numpy as np
 
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
 
-def load_labels(path='labels.txt'):
+def load_labels(path='/home/pi/Desktop/tfod/TFODRPi/labels.txt'):
   """Loads the labels file. Supports files with or without index numbers."""
   with open(path, 'r', encoding='utf-8') as f:
     lines = f.readlines()
@@ -38,10 +36,10 @@ def detect_objects(interpreter, image, threshold):
   set_input_tensor(interpreter, image)
   interpreter.invoke()
   # Get all output details
-  boxes = get_output_tensor(interpreter, 0)
-  classes = get_output_tensor(interpreter, 1)
-  scores = get_output_tensor(interpreter, 2)
-  count = int(get_output_tensor(interpreter, 3))
+  boxes = get_output_tensor(interpreter, 1)
+  classes = get_output_tensor(interpreter, 3)
+  scores = get_output_tensor(interpreter, 0)
+  count = int(get_output_tensor(interpreter, 2))
 
   results = []
   for i in range(count):
@@ -54,6 +52,10 @@ def detect_objects(interpreter, image, threshold):
       results.append(result)
   return results
 
+
+
+
+
 def main():
     labels = load_labels()
     interpreter = Interpreter('detect.tflite')
@@ -61,10 +63,12 @@ def main():
     _, input_height, input_width, _ = interpreter.get_input_details()[0]['shape']
 
     cap = cv2.VideoCapture(0)
+    CAMERA_WIDTH = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    CAMERA_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     while cap.isOpened():
         ret, frame = cap.read()
         img = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (320,320))
-        res = detect_objects(interpreter, img, 0.8)
+        res = detect_objects(interpreter, img, 0.2)
         print(res)
 
         for result in res:
